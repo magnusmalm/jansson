@@ -492,6 +492,8 @@ static int lex_scan_number(lex_t *lex, int c, json_error_t *error)
     const char *saved_text;
     char *end;
     double doubleval;
+    int is_hex = 0;
+    int hex_offset = 0;
 
     lex->token = TOKEN_INVALID;
 
@@ -500,15 +502,37 @@ static int lex_scan_number(lex_t *lex, int c, json_error_t *error)
 
     if(c == '0') {
         c = lex_get_save(lex, error);
-        if(l_isdigit(c)) {
-            lex_unget_unsave(lex, c);
-            goto out;
-        }
+	if(c == 'x') {
+	    c = lex_get_save(lex, error);
+	    if(l_isxdigit(c)) {
+		do {
+		    c = lex_get_save(lex, error);
+		}
+		while(l_isxdigit(c));
+		is_hex = 1;
+	    }
+	    else {
+		lex_unget_unsave(lex, c);
+		lex_unget_unsave(lex, c);
+		goto out;
+	    }
+	}
+	else {
+	    lex_unget_unsave(lex, c);
+	    goto out;
+	}
+
     }
     else if(l_isdigit(c)) {
         do
             c = lex_get_save(lex, error);
         while(l_isdigit(c));
+    }
+    else if(l_isxdigit(c)) {
+	do
+	    c = lex_get_save(lex, error);
+        while(l_isxdigit(c));
+	is_hex = 1;
     }
     else {
         lex_unget_unsave(lex, c);
@@ -522,19 +546,26 @@ static int lex_scan_number(lex_t *lex, int c, json_error_t *error)
 
         lex_unget_unsave(lex, c);
 
-        saved_text = strbuffer_value(&lex->saved_text);
+	saved_text = strbuffer_value(&lex->saved_text);
 
-        errno = 0;
-        intval = json_strtoint(saved_text, &end, 10);
-        if(errno == ERANGE) {
-            if(intval < 0)
-                error_set(error, lex, json_error_numeric_overflow, "too big negative integer");
-            else
-                error_set(error, lex, json_error_numeric_overflow, "too big integer");
-            goto out;
-        }
+	errno = 0;
+	if (is_hex)
+	{
+	    hex_offset = (saved_text[1] == 'x' ? 2 : 0);
+	    intval = json_strtoint(saved_text + hex_offset, &end, 16);
+	}
+	else {
+	    intval = json_strtoint(saved_text, &end, 10);
+	}
+	if(errno == ERANGE) {
+	    if(intval < 0)
+		error_set(error, lex, json_error_numeric_overflow, "too big negative integer");
+	    else
+		error_set(error, lex, json_error_numeric_overflow, "too big integer");
+	    goto out;
+	}
 
-        assert(end == saved_text + lex->saved_text.length);
+	assert(end == saved_text + lex->saved_text.length);
 
         lex->token = TOKEN_INTEGER;
         lex->value.integer = intval;
