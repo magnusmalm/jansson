@@ -155,6 +155,57 @@ stream_init(stream_t *stream, get_func get, void *data)
     stream->position = 0;
 }
 
+static int stream_peek(stream_t *stream, json_error_t *error)
+{
+  int c;
+
+  if(stream->state != STREAM_STATE_OK)
+    return stream->state;
+
+  if(!stream->buffer[stream->buffer_pos])
+    {
+      c = stream->get(stream->data);
+      if(c == EOF) {
+	stream->state = STREAM_STATE_EOF;
+	return STREAM_STATE_EOF;
+      }
+
+      stream->buffer[0] = c;
+      stream->buffer_pos = 0;
+
+      if(0x80 <= c && c <= 0xFF)
+        {
+	  /* multi-byte UTF-8 sequence */
+	  size_t i, count;
+
+	  count = utf8_check_first(c);
+	  if(!count)
+	    goto out;
+
+	  assert(count >= 2);
+
+	  for(i = 1; i < count; i++)
+	    stream->buffer[i] = stream->get(stream->data);
+
+	  if(!utf8_check_full(stream->buffer, count, NULL))
+	    goto out;
+
+	  stream->buffer[count] = '\0';
+        }
+      else
+	stream->buffer[1] = '\0';
+    }
+
+  c = stream->buffer[stream->buffer_pos];
+
+  return c;
+
+ out:
+  stream->state = STREAM_STATE_ERROR;
+  error_set(error, stream_to_lex(stream), json_error_invalid_utf8, "unable to decode byte 0x%x", c);
+  return STREAM_STATE_ERROR;
+}
+
 static int stream_get(stream_t *stream, json_error_t *error)
 {
     int c;
@@ -236,6 +287,12 @@ static void stream_unget(stream_t *stream, int c)
     assert(stream->buffer[stream->buffer_pos] == c);
 }
 
+static int lex_peek(lex_t *lex, json_error_t *error)
+{
+    if (lex->stream.state >= STREAM_STATE_OK)
+	return stream_peek(&lex->stream, error);
+    return lex->stream.state;
+}
 
 static int lex_get(lex_t *lex, json_error_t *error)
 {
@@ -618,15 +675,50 @@ out:
 static int lex_scan(lex_t *lex, json_error_t *error)
 {
     int c;
+    int peek;
 
     strbuffer_clear(&lex->saved_text);
 
     if(lex->token == TOKEN_STRING)
         lex_free_string(lex);
 
-    do
-        c = lex_get(lex, error);
-    while(c == ' ' || c == '\t' || c == '\n' || c == '\r');
+    do {
+	c = lex_get(lex, error);
+	peek = lex_peek(lex, error);
+    } while(c == ' ' || c == '\t' || c == '\n' || c == '\r');
+
+    while ((c == '/' && peek == '/') ||
+	   (c == '/' && peek == '*')) {
+	if (c == '/' && peek == '/') {
+	    do {
+		c = lex_get(lex, error);
+	    } while (c != '\n' && c != '\r');
+	    c = lex_get(lex, error);
+	    peek = lex_peek(lex, error);
+	    while(c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+		c = lex_get(lex, error);
+		peek = lex_peek(lex, error);
+	    }
+	}
+
+	if (c == '/' && peek == '*') {
+	    c = lex_get(lex, error);
+	    peek = lex_peek(lex, error);
+	    do {
+		c = lex_get(lex, error);
+		peek = lex_peek(lex, error);
+	    } while (c != '*' || peek != '/');
+
+	    c = lex_get(lex, error);
+	    peek = lex_peek(lex, error);
+	    c = lex_get(lex, error);
+	    peek = lex_peek(lex, error);
+	    while(c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+		c = lex_get(lex, error);
+		peek = lex_peek(lex, error);
+	    }
+	}
+    }
 
     if(c == STREAM_STATE_EOF) {
         lex->token = TOKEN_EOF;
